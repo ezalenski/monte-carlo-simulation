@@ -1,4 +1,4 @@
-Symbol,Weight or dollar amount (must include $)
-GE,$250
-AAPL,$250
-GS,$250
+Symbol
+GE
+AAPL
+GS

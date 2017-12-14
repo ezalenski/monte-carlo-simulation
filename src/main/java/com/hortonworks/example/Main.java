@@ -34,6 +34,8 @@ import java.util.stream.Collectors;
  * add kryo serializer
  */
 public class Main {
+    private final static String API_KEY = "fazBfG5rze4V5zxB-qkQ";
+
     public static void main(String[] args) throws Exception {
         String logFile = "./README.md"; // Should be some file on your system
         SparkSession spark = SparkSession
@@ -50,10 +52,31 @@ public class Main {
         String start_date = "1990-01-01";
         String end_date = "2017-11-30";
         String url = "https://www.quandl.com/api/v3/datasets/WIKI/";
+        String tickerUrl = "https://www.quandl.com/api/v3/datatables/WIKI/PRICES.csv";
+
         if (args.length > 0) {
             listOfCompanies = args[0];
         }
 
+        DefaultHttpClient client = new DefaultHttpClient();
+        HttpGet request = new HttpGet(tickerUrl + String.format("?date=%s&qopts.columns=ticker,close&api_key=%s", end_date, API_KEY));
+        HttpResponse response = client.execute(request);
+        BasicResponseHandler handler = new BasicResponseHandler();
+        List<String> bestTickers = Arrays.asList(handler.handleResponse(response).trim().toString().split("\n"))
+            .stream()
+            .filter(line -> !line.contains("ticker"))
+            .map(line -> {
+                    String[] splits = line.split(",", -2);
+                    String symbol = splits[0];
+                    Double price = new Double(splits[1]);
+                    return new Tuple2<>(symbol, price);
+                })
+            .sorted((a, b) -> Double.compare(a._2(), b._2()))
+            .limit(25)
+            .map(t -> t._1())
+            .collect(Collectors.toList());
+
+        //bestTickers.forEach(t -> System.out.println(t));
         /*
           read a list of stock symbols and their weights in the portfolio, then transform into a Map<Symbol,Weight>
           1. read in the data, ignoring header
@@ -61,22 +84,17 @@ public class Main {
           3. create a local map
         */
         JavaRDD<String> filteredFileRDD = jsc.textFile(listOfCompanies).filter(s -> !s.startsWith("#") && !s.trim().isEmpty());
-        JavaPairRDD<String, String> symbolsAndWeightsRDD = filteredFileRDD.filter(s -> !s.startsWith("Symbol")).mapToPair(s -> {
+        filteredFileRDD = filteredFileRDD.union(jsc.parallelize(bestTickers));
+        JavaPairRDD<String, Double> symbolsAndWeightsRDD = filteredFileRDD.filter(s -> !s.startsWith("Symbol")).mapToPair(s -> {
                 String[] splits = s.split(",", -2);
-                return new Tuple2<>(splits[0], splits[1]);
+                return new Tuple2<>(splits[0], 1.0);
             });
 
         //convert from $ to % weight in portfolio
         Map<String, Float> symbolsAndWeights;
         Long totalInvestement;
-        if (symbolsAndWeightsRDD.first()._2().contains("$")) {
-            JavaPairRDD<String, Float> symbolsAndDollarsRDD = symbolsAndWeightsRDD.mapToPair(x -> new Tuple2<>(x._1(), new Float(x._2().replaceAll("\\$", ""))));
-            totalInvestement = symbolsAndDollarsRDD.reduce((x, y) -> new Tuple2<>("total", x._2() + y._2()))._2().longValue();
-            symbolsAndWeights = symbolsAndDollarsRDD.mapToPair(x -> new Tuple2<>(x._1(), x._2() / totalInvestement)).collectAsMap();
-        } else {
-            totalInvestement = 1000L;
-            symbolsAndWeights = symbolsAndWeightsRDD.mapToPair(x -> new Tuple2<>(x._1(), new Float(x._2()))).collectAsMap();
-        }
+        totalInvestement = 1000L;
+        symbolsAndWeights = symbolsAndWeightsRDD.mapToPair(x -> new Tuple2<>(x._1(), new Float(x._2()))).collectAsMap();
 
         //debug
         System.out.println("symbolsAndWeights");
@@ -92,18 +110,24 @@ public class Main {
         // 1. get a PairRDD of date -> Tuple2(symbol, changeInPrice)
 
         List<Tuple2<String, Tuple2<String, Float>>> datesToSymbolsAndChangeList = symbolsAndWeightsRDD.map(t -> {
-                DefaultHttpClient client = new DefaultHttpClient();
-                HttpGet request = new HttpGet(url + String.format("%s.csv?start_date=%s&end_date=%s&transform=rdiff", t._1(), start_date, end_date));
-                HttpResponse response = client.execute(request);
-                BasicResponseHandler handler = new BasicResponseHandler();
-                return Arrays.asList(handler.handleResponse(response).trim().toString().split("\n"))
+                DefaultHttpClient c = new DefaultHttpClient();
+                HttpGet req = new HttpGet(url + String.format("%s.csv?start_date=%s&end_date=%s&transform=rdiff", t._1(), start_date, end_date));
+                HttpResponse res = c.execute(req);
+                BasicResponseHandler h = new BasicResponseHandler();
+                return Arrays.asList(h.handleResponse(res).trim().toString().split("\n"))
                 .stream()
-                .filter(line -> !line.contains("Date"))
+                .filter(line -> {
+                        if(!line.contains("Date")) {
+                            String[] splits = line.split(",", -2);
+                            return !splits[splits.length-1].isEmpty();
+                        }
+                        return false;
+                    })
                 .map(line -> {
                         String[] splits = line.split(",", -2);
-                        Float changeInPrice = new Float(splits[splits.length-1]);
                         String symbol = t._1();
                         String date = splits[0];
+                        Float changeInPrice = new Float(splits[splits.length-1]);
                         return new Tuple2<>(date, new Tuple2<>(symbol, changeInPrice));
                     })
                 .collect(Collectors.toList());
@@ -132,7 +156,7 @@ public class Main {
         //filterdDatesToSymbolsAndChangeRDD.take(10).forEach(x -> System.out.println(x._1() + "->" + x._2()));
 
         if (numEvents < 1) {
-            System.out.println("No trade data");
+            System.out.println("Not enough trade data");
             spark.stop();
             System.exit(0);
         }
@@ -143,6 +167,7 @@ public class Main {
           2. sum(stock weight in overall portfolio * change in price on that date)
         */
         double fraction = 1.0 * NUM_TRIALS / numEvents;
+        int numDays = 365;
         JavaPairRDD<String, Float> resultOfTrials = filterdDatesToSymbolsAndChangeRDD.sample(true, fraction).mapToPair(i -> {
                 Float total = 0f;
                 for (Tuple2 t : i._2()) {
@@ -159,6 +184,7 @@ public class Main {
                 return new Tuple2<>(i._1(), total);
             });
         //debug
+        //System.out.println("events: " + numEvents);
         //System.out.println("fraction: " + fraction);
         //System.out.println("total runs: " + resultOfTrials.count());
         //resultOfTrials.take(10).forEach(System.out::println);
