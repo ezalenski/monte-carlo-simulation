@@ -9,23 +9,23 @@ destinationDir=${1:-/tmp/stockData/}
 echo Running as $(id -un) on $(uname -n):$(pwd -P)
 echo Will save data to $destinationDir
 
-fromMonth=0
+fromMonth=01
 toMonth=11
 fromYear=1990
-toYear=2020
-fromDay=1
-toDay=31
+toYear=2017
+fromDay=01
+toDay=30
 t=$(mktemp -d /tmp/downloadStock-input-XXXXX)
 i=0
 oldestCompanies=$(cat companies_list.txt |  egrep -v '^(#.*|\s+)$' | tail -n +2 | cut -d',' -f1)
 for s in $oldestCompanies; do
 
  #columns are: Date,Open,High,Low,Close,Volume,Adj Close
- url="http://ichart.finance.yahoo.com/table.csv?s=$s&ignore=.csv&g=d&a=$fromMonth&b=$fromDay&c=$fromYear&d=$toMonth&e=$toDay&f=$toYear"
+ url="https://www.quandl.com/api/v3/datasets/WIKI/$s.csv?start_date=$fromYear-$fromMonth-$fromDay&end_date=$toYear-$toMonth-$toDay"
  echo Downloading historical data for $s
 
  (
- curl -s "$url" | tail -n +2  | tac > $t/${s}.csv
+ curl -s "$url" | cut -d, -f7-11,13 --complement | tail -n +2  | tac > $t/${s}.csv
 
  #add Symbol and Change % columns to csv
  lastPrice=
