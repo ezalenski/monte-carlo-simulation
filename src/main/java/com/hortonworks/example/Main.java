@@ -16,12 +16,14 @@ import org.apache.http.entity.StringEntity;
 import org.apache.http.impl.client.DefaultHttpClient;
 import org.apache.http.impl.client.BasicResponseHandler;
 import org.apache.http.HttpResponse;
+import org.apache.http.client.HttpResponseException;
 
 import scala.Tuple2;
 
 import java.io.File;
 import java.util.Collections;
 import java.util.List;
+import java.util.ArrayList;
 import java.util.Map;
 import java.util.Arrays;
 import java.util.stream.Collectors;
@@ -47,7 +49,7 @@ public class Main {
         /*
           Initializations
         */
-        final int NUM_TRIALS = 1000000;
+        final int NUM_TRIALS = 5;
         String listOfCompanies = new File("companies_list.txt").toURI().toString();
         String start_date = "1990-01-01";
         String end_date = "2017-11-30";
@@ -109,28 +111,33 @@ public class Main {
 
         // 1. get a PairRDD of date -> Tuple2(symbol, changeInPrice)
 
-        List<Tuple2<String, Tuple2<String, Float>>> datesToSymbolsAndChangeList = symbolsAndWeightsRDD.map(t -> {
+        List<Tuple2<String, Tuple2<String, Double>>> datesToSymbolsAndChangeList = symbolsAndWeightsRDD.map(t -> {
                 DefaultHttpClient c = new DefaultHttpClient();
                 HttpGet req = new HttpGet(url + String.format("%s.csv?start_date=%s&end_date=%s&transform=rdiff", t._1(), start_date, end_date));
                 HttpResponse res = c.execute(req);
                 BasicResponseHandler h = new BasicResponseHandler();
-                return Arrays.asList(h.handleResponse(res).trim().toString().split("\n"))
-                .stream()
-                .filter(line -> {
-                        if(!line.contains("Date")) {
-                            String[] splits = line.split(",", -2);
-                            return !splits[splits.length-1].isEmpty();
-                        }
-                        return false;
-                    })
-                .map(line -> {
+                try {
+                    return Arrays.asList(h.handleResponse(res).trim().toString().split("\n"))
+                        .stream()
+                        .filter(line -> {
+                                if(!line.contains("Date")) {
+                                    String[] splits = line.split(",", -2);
+                                    return !splits[splits.length-1].isEmpty();
+                                }
+                                return false;
+                            })
+                        .map(line -> {
                         String[] splits = line.split(",", -2);
                         String symbol = t._1();
                         String date = splits[0];
-                        Float changeInPrice = new Float(splits[splits.length-1]);
+                        Double changeInPrice = new Double(splits[splits.length-1]);
                         return new Tuple2<>(date, new Tuple2<>(symbol, changeInPrice));
-                    })
-                .collect(Collectors.toList());
+                            })
+                        .collect(Collectors.toList());
+                } catch(HttpResponseException e) {
+                    System.out.println(e.getStatusCode());
+                    throw new Exception("WTF");
+                }
             }).collect()
             .stream()
             .flatMap(List::stream)
@@ -140,8 +147,8 @@ public class Main {
         //System.out.println(datesToSymbolsAndChangeList.get(0));
 
         //2. reduce by key to get all dates together
-        JavaPairRDD<String, Tuple2<String, Float>> datesToSymbolsAndChangeRDD = jsc.parallelize(datesToSymbolsAndChangeList).mapToPair(x -> x);
-        JavaPairRDD<String, Iterable<Tuple2<String, Float>>> groupedDatesToSymbolsAndChangeRDD = datesToSymbolsAndChangeRDD.groupByKey();
+        JavaPairRDD<String, Tuple2<String, Double>> datesToSymbolsAndChangeRDD = jsc.parallelize(datesToSymbolsAndChangeList).mapToPair(x -> x);
+        JavaPairRDD<String, Iterable<Tuple2<String, Double>>> groupedDatesToSymbolsAndChangeRDD = datesToSymbolsAndChangeRDD.groupByKey();
         //debug
         //System.out.println(groupedDatesToSymbolsAndChangeRDD.first()._1() + "->" + groupedDatesToSymbolsAndChangeRDD.first()._2());
 
@@ -150,7 +157,7 @@ public class Main {
         Map<String, Long> countsByDate = datesToSymbolsAndChangeRDD.countByKey();
         //System.out.println("num symbols: " + numSymbols);
         //System.out.println(countsByDate);
-        JavaPairRDD<String, Iterable<Tuple2<String, Float>>> filterdDatesToSymbolsAndChangeRDD = groupedDatesToSymbolsAndChangeRDD.filter(x -> (Long) countsByDate.get(x._1()) >= numSymbols);
+        JavaPairRDD<String, Iterable<Tuple2<String, Double>>> filterdDatesToSymbolsAndChangeRDD = groupedDatesToSymbolsAndChangeRDD.filter(x -> (Long) countsByDate.get(x._1()) >= numSymbols);
         long numEvents = filterdDatesToSymbolsAndChangeRDD.count();
         //debug
         //filterdDatesToSymbolsAndChangeRDD.take(10).forEach(x -> System.out.println(x._1() + "->" + x._2()));
@@ -166,28 +173,27 @@ public class Main {
           1. pick a random date from the list of historical trade dates
           2. sum(stock weight in overall portfolio * change in price on that date)
         */
-        double fraction = 1.0 * NUM_TRIALS / numEvents;
-        int numDays = 365;
-        JavaPairRDD<String, Float> resultOfTrials = filterdDatesToSymbolsAndChangeRDD.sample(true, fraction).mapToPair(i -> {
-                Float total = 0f;
-                for (Tuple2 t : i._2()) {
-                    String symbol = t._1().toString();
-                    Float changeInPrice = new Float(t._2().toString());
-                    Float weight = symbolsAndWeights.get(symbol);
+        List<Integer> l = new ArrayList<>(NUM_TRIALS);
+        for (int i = 0; i < NUM_TRIALS; i++) {
+            l.add(i);
+        }
 
-                    total += changeInPrice * weight;
-                    //debug
-                    //                System.out.println("on " + i._1() + " " + symbol + " with weight " + weight + " changed by " + changeInPrice
-                    //                        + " for a total of " + total);
-                }
-                //            System.out.println("Total % change on " + i._1() + " was " + total);
-                return new Tuple2<>(i._1(), total);
+        JavaRDD<JavaPairRDD<String, Double>> trialResults = jsc.parallelize(l).map(i -> {
+                int numDays = 365;
+                double fraction = 1.0 * numDays / numEvents;
+                return filterdDatesToSymbolsAndChangeRDD.sample(true, fraction)
+                .map(t -> t._2())
+                .flatMapToPair(x -> x.iterator())
+                .reduceByKey((agg, dayChange) -> agg + dayChange);
             });
+
+
+
+
         //debug
         //System.out.println("events: " + numEvents);
         //System.out.println("fraction: " + fraction);
         //System.out.println("total runs: " + resultOfTrials.count());
-        //resultOfTrials.take(10).forEach(System.out::println);
 
         /*
           create a temporary table out of the data and take the 5%, 50%, and 95% percentiles
@@ -198,12 +204,12 @@ public class Main {
           4. Use that schema to create a data frame
           5. execute Hive percentile() SQL function
         */
-
-        JavaRDD<Row> resultOfTrialsRows = resultOfTrials.map(x -> RowFactory.create(x._1(), Math.round(x._2() * 100)));
-        StructType schema = DataTypes.createStructType(new StructField[]{DataTypes.createStructField("date", DataTypes.StringType, false), DataTypes.createStructField("changePct", DataTypes.IntegerType, false)});
+        /*
+        JavaRDD<Row> resultOfTrialsRows = trialResults.flatMap(x -> RowFactory.create(x._1(), Math.round(x._2())));
+        StructType schema = DataTypes.createStructType(new StructField[]{DataTypes.createStructField("symbol", DataTypes.StringType, false), DataTypes.createStructField("changePct", DataTypes.IntegerType, false)});
         Dataset<Row> resultOfTrialsDF = spark.createDataFrame(resultOfTrialsRows, schema);
         resultOfTrialsDF.registerTempTable("results");
-        List<Row> percentilesRow = spark.sql("select percentile(changePct, array(0.05,0.50,0.95)) from results").collectAsList();
+        List<Row> percentilesRow = spark.sql("select symbol, percentile(changePct, array(0.05,0.50,0.95)) from results groupby symbol").collectAsList();
 
         //        System.out.println(sqlContext.sql("select * from results order by changePct").collectAsList());
         float worstCase = new Float(percentilesRow.get(0).getList(0).get(0).toString()) / 100;
@@ -215,7 +221,7 @@ public class Main {
         System.out.println(String.format("%25s %7d %7.2f%%", "worst case", Math.round(totalInvestement * worstCase / 100), worstCase));
         System.out.println(String.format("%25s %7d %7.2f%%", "most likely scenario", Math.round(totalInvestement * mostLikely / 100), mostLikely));
         System.out.println(String.format("%25s %7d %7.2f%%", "best case", Math.round(totalInvestement * bestCase / 100), bestCase));
-
+        */
         spark.stop();
     }
 }
