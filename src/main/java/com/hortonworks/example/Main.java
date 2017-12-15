@@ -7,6 +7,7 @@ import org.apache.spark.sql.SparkSession;
 import org.apache.spark.sql.Dataset;
 import org.apache.spark.sql.Row;
 import org.apache.spark.sql.RowFactory;
+import org.apache.spark.sql.sources.In;
 import org.apache.spark.sql.types.DataTypes;
 import org.apache.spark.sql.types.StructField;
 import org.apache.spark.sql.types.StructType;
@@ -18,6 +19,7 @@ import org.apache.http.impl.client.BasicResponseHandler;
 import org.apache.http.HttpResponse;
 import org.apache.http.client.HttpResponseException;
 
+import scala.Int;
 import scala.Tuple2;
 
 import java.io.File;
@@ -223,5 +225,72 @@ public class Main {
         System.out.println(String.format("%25s %7d %7.2f%%", "best case", Math.round(totalInvestement * bestCase / 100), bestCase));
         */
         spark.stop();
+    }
+
+    /**
+     * Knapsack Implementation
+     * @param money
+     * @param map
+     * @return
+     */
+    Tuple2<Integer, List<Tuple2<String,Integer>>> knapsack(double money, Map<String, Tuple2<Double, Double>> map){
+        List<Tuple2<Integer,List<Tuple2<String, Integer>>>> dp = new ArrayList<>();
+
+        List<String> keyList = new ArrayList<String>(map.keySet());
+        int len = keyList.size();
+
+        for(int i = 0; i <= money; i++){
+            String keyI = keyList.get(i);
+            Tuple2<Integer,List<Tuple2<String, Integer>>> empty = new Tuple2<>(0, new ArrayList<>());
+            dp.add(empty);
+
+            for(int j = 0; j < len; j++){
+                String keyJ = keyList.get(j);
+                if(Math.round(map.get(keyJ)._1) <= i){
+                    Tuple2<Integer,List<Tuple2<String, Integer>>> firstItem = deepCopy(dp.get(i));
+                    Tuple2<Integer,List<Tuple2<String, Integer>>> secondItem = deepCopy(dp.get(i - (int)Math.round(map.get(keyJ)._1)));
+                    secondItem = appendToList(secondItem, keyJ, (int)Math.round(map.get(keyJ)._2));
+                    if (!max(firstItem, secondItem)) {
+                        dp.remove(i);
+                        dp.add(secondItem);
+                    }
+                }
+            }
+        }
+        return dp.get(dp.size()-1);
+    }
+
+    boolean max(Tuple2<Integer,List<Tuple2<String, Integer>>> t1,
+                                                      Tuple2<Integer,List<Tuple2<String, Integer>>> t2){
+        if(t1._1 >= t2._1){
+            return true;
+        }
+        else {
+            return false;
+        }
+    }
+
+
+
+    Tuple2<Integer,List<Tuple2<String, Integer>>> deepCopy(Tuple2<Integer,List<Tuple2<String, Integer>>> obj) {
+        Tuple2<Integer,List<Tuple2<String, Integer>>> item = new Tuple2<>(obj._1,
+                new ArrayList<Tuple2<String, Integer>>());
+
+        for (Tuple2<String, Integer> tuple : obj._2) {
+            item._2.add(new Tuple2<>(tuple._1, tuple._2));
+        }
+
+        return item;
+    }
+
+    Tuple2<Integer,List<Tuple2<String, Integer>>> appendToList(Tuple2<Integer,List<Tuple2<String, Integer>>> item, String symbol, double val) {
+        List<Tuple2<String, Integer>> array = item._2;
+
+        Tuple2<String, Integer> newTuple = new Tuple2<>(symbol, 1);
+        array.add(newTuple);
+
+        Tuple2<Integer,List<Tuple2<String, Integer>>> newItem = new Tuple2<>(item._1 + (int) Math.round(val), array);
+
+        return newItem;
     }
 }
