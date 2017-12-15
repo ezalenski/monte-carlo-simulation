@@ -38,7 +38,6 @@ import java.util.stream.Collectors;
  * add kryo serializer
  */
 public class Main {
-
     public static ThisDate makeDate(String d){
         return new ThisDate(d);
     }
@@ -66,8 +65,8 @@ public class Main {
         */
         int NUM_TRIALS = 5;
         String listOfCompanies = new File("companies_list.txt").toURI().toString();
-        String start_date = "1990-01-01";
-        String end_date = "2017-11-30";
+        String start_date;
+        String end_date;
         String url = "https://www.quandl.com/api/v3/datasets/WIKI/";
         String tickerUrl = "https://www.quandl.com/api/v3/datatables/WIKI/PRICES.csv";
         String API_KEY;
@@ -84,15 +83,21 @@ public class Main {
         }
         if(args.length > 2){
             startD = makeDate(args[2]);
+            start_date = args[2];
+        } else {
+            start_date = "1990-01-01";
         }
         if(args.length > 3){
             endD = makeDate(args[3]);
+            end_date = args[3];
+        } else {
+            end_date = "2017-11-30";
         }
         if(args.length > 4){
             NUM_TRIALS = Integer.parseInt(args[4]);
         }
         if(args.length > 5){
-            API_KEY = args[1];
+            API_KEY = args[5];
         }
         else {
             API_KEY = "fazBfG5rze4V5zxB-qkQ";
@@ -123,7 +128,6 @@ public class Main {
             .map(t -> t._1())
             .collect(Collectors.toList());
 
-        //bestTickers.forEach(t -> System.out.println(t));
         /*
           read a list of stock symbols and their weights in the portfolio, then transform into a Map<Symbol,Weight>
           1. read in the data, ignoring header
@@ -137,7 +141,6 @@ public class Main {
                 return new Tuple2<>(splits[0], 1.0);
             });
 
-        //convert from $ to % weight in portfolio
         Map<String, Double> symbolStartPrices = symbolsAndWeightsRDD.mapToPair(t -> {
                 DefaultHttpClient c = new DefaultHttpClient();
                 HttpGet req = new HttpGet(url + String.format("%s.csv?column_index=4&start_date=%s&end_date=%s&api_key=%s", t._1(), start_date, end_date, API_KEY));
@@ -167,16 +170,12 @@ public class Main {
                 }
             }).collectAsMap();
 
-        //debug
-        System.out.println("symbolStartPrices");
-        symbolStartPrices.forEach((s, d) -> System.out.println("symbol: " + s + ", price: " + d));
-
         /*
           read all stock trading data, and transform
           1. get a PairRDD of date -> (symbol, changeInPrice)
           2. reduce by key to get all dates together
           3. filter every date that doesn't have the max number of symbols
-          \        */
+        */
 
         // 1. get a PairRDD of date -> Tuple2(symbol, changeInPrice)
 
@@ -212,24 +211,15 @@ public class Main {
             .flatMap(List::stream)
             .collect(Collectors.toList());
 
-        //debug
-        //System.out.println(datesToSymbolsAndChangeList.get(0));
-
         //2. reduce by key to get all dates together
         JavaPairRDD<String, Tuple2<String, Double>> datesToSymbolsAndChangeRDD = jsc.parallelize(datesToSymbolsAndChangeList).mapToPair(x -> x);
         JavaPairRDD<String, Iterable<Tuple2<String, Double>>> groupedDatesToSymbolsAndChangeRDD = datesToSymbolsAndChangeRDD.groupByKey();
-        //debug
-        //System.out.println(groupedDatesToSymbolsAndChangeRDD.first()._1() + "->" + groupedDatesToSymbolsAndChangeRDD.first()._2());
 
         //3. filter every date that doesn't have the max number of symbols
         long numSymbols = symbolsAndWeightsRDD.count();
         Map<String, Long> countsByDate = datesToSymbolsAndChangeRDD.countByKey();
-        //System.out.println("num symbols: " + numSymbols);
-        //System.out.println(countsByDate);
         JavaPairRDD<String, Iterable<Tuple2<String, Double>>> filterdDatesToSymbolsAndChangeRDD = groupedDatesToSymbolsAndChangeRDD.filter(x -> (Long) countsByDate.get(x._1()) >= numSymbols);
         long numEvents = filterdDatesToSymbolsAndChangeRDD.count();
-        //debug
-        //filterdDatesToSymbolsAndChangeRDD.take(10).forEach(x -> System.out.println(x._1() + "->" + x._2()));
 
         if (numEvents < 1) {
             System.out.println("Not enough trade data");
@@ -255,11 +245,6 @@ public class Main {
                 .flatMapToPair(x -> x.iterator())
                 .reduceByKey((agg, dayChange) -> agg + dayChange);
             }).collect(Collectors.toList());
-
-        //debug
-        //System.out.println("events: " + numEvents);
-        //System.out.println("fraction: " + fraction);
-        //System.out.println("total runs: " + resultOfTrials.count());
 
         /*
           create a temporary table out of the data and take the 5%, 50%, and 95% percentiles
@@ -341,8 +326,6 @@ public class Main {
             return false;
         }
     }
-
-
 
     private static Tuple2<Integer,List<Tuple2<String, Integer>>> deepCopy(Tuple2<Integer,List<Tuple2<String, Integer>>> obj) {
         Tuple2<Integer,List<Tuple2<String, Integer>>> item = new Tuple2<>(obj._1,
