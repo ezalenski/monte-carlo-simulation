@@ -38,10 +38,8 @@ import java.util.stream.Collectors;
  * add kryo serializer
  */
 public class Main {
-    private final static String API_KEY = "fazBfG5rze4V5zxB-qkQ";
 
     public static void main(String[] args) throws Exception {
-        String logFile = "./README.md"; // Should be some file on your system
         SparkSession spark = SparkSession
             .builder()
             .appName("monte-carlo-var-calculator")
@@ -57,9 +55,15 @@ public class Main {
         String end_date = "2017-11-30";
         String url = "https://www.quandl.com/api/v3/datasets/WIKI/";
         String tickerUrl = "https://www.quandl.com/api/v3/datatables/WIKI/PRICES.csv";
+        String API_KEY;
 
         if (args.length > 0) {
             listOfCompanies = args[0];
+        }
+        if (args.length > 1) {
+            API_KEY = args[1];
+        } else {
+            API_KEY = "fazBfG5rze4V5zxB-qkQ";
         }
 
         DefaultHttpClient client = new DefaultHttpClient();
@@ -75,7 +79,7 @@ public class Main {
                     Double price = new Double(splits[1]);
                     return new Tuple2<>(symbol, price);
                 })
-            .sorted((a, b) -> Double.compare(a._2(), b._2()))
+            .sorted((a, b) -> Double.compare(b._2(), a._2()))
             .limit(25)
             .map(t -> t._1())
             .collect(Collectors.toList());
@@ -95,14 +99,39 @@ public class Main {
             });
 
         //convert from $ to % weight in portfolio
-        Map<String, Float> symbolsAndWeights;
-        Long totalInvestement;
-        totalInvestement = 1000L;
-        symbolsAndWeights = symbolsAndWeightsRDD.mapToPair(x -> new Tuple2<>(x._1(), new Float(x._2()))).collectAsMap();
+        Double totalInvestment = 1000.0;
+        Map<String, Double> symbolStartPrices = symbolsAndWeightsRDD.mapToPair(t -> {
+                DefaultHttpClient c = new DefaultHttpClient();
+                HttpGet req = new HttpGet(url + String.format("%s.csv?column_index=4&start_date=%s&end_date=%s&api_key=%s", t._1(), start_date, end_date, API_KEY));
+                HttpResponse res = c.execute(req);
+                BasicResponseHandler h = new BasicResponseHandler();
+                try {
+                    return Arrays.asList(h.handleResponse(res).trim().toString().split("\n"))
+                        .stream()
+                        .filter(line -> {
+                                if(!line.contains("Date")) {
+                                    String[] splits = line.split(",", -2);
+                                    return !splits[splits.length-1].isEmpty();
+                                }
+                                return false;
+                            })
+                        .limit(1)
+                        .map(line -> {
+                                String[] splits = line.split(",", -2);
+                                String symbol = t._1();
+                                Double price = new Double(splits[splits.length-1]);
+                                return new Tuple2<>(t._1(), price);
+                            })
+                        .collect(Collectors.toList()).get(0);
+                } catch(HttpResponseException e) {
+                    System.out.println(e.getStatusCode());
+                    throw new Exception("WTF");
+                }
+            }).collectAsMap();
 
         //debug
-        System.out.println("symbolsAndWeights");
-        symbolsAndWeights.forEach((s, f) -> System.out.println("symbol: " + s + ", % of portfolio: " + f));
+        System.out.println("symbolStartPrices");
+        symbolStartPrices.forEach((s, d) -> System.out.println("symbol: " + s + ", price: " + d));
 
         /*
           read all stock trading data, and transform
@@ -115,7 +144,7 @@ public class Main {
 
         List<Tuple2<String, Tuple2<String, Double>>> datesToSymbolsAndChangeList = symbolsAndWeightsRDD.map(t -> {
                 DefaultHttpClient c = new DefaultHttpClient();
-                HttpGet req = new HttpGet(url + String.format("%s.csv?start_date=%s&end_date=%s&transform=rdiff", t._1(), start_date, end_date));
+                HttpGet req = new HttpGet(url + String.format("%s.csv?start_date=%s&end_date=%s&transform=rdiff&api_key=%s", t._1(), start_date, end_date, API_KEY));
                 HttpResponse res = c.execute(req);
                 BasicResponseHandler h = new BasicResponseHandler();
                 try {
@@ -180,17 +209,14 @@ public class Main {
             l.add(i);
         }
 
-        JavaRDD<JavaPairRDD<String, Double>> trialResults = jsc.parallelize(l).map(i -> {
+        List<JavaPairRDD<String, Double>> trialResults = l.stream().map(i -> {
                 int numDays = 365;
                 double fraction = 1.0 * numDays / numEvents;
                 return filterdDatesToSymbolsAndChangeRDD.sample(true, fraction)
                 .map(t -> t._2())
                 .flatMapToPair(x -> x.iterator())
                 .reduceByKey((agg, dayChange) -> agg + dayChange);
-            });
-
-
-
+            }).collect(Collectors.toList());
 
         //debug
         //System.out.println("events: " + numEvents);
@@ -206,24 +232,33 @@ public class Main {
           4. Use that schema to create a data frame
           5. execute Hive percentile() SQL function
         */
-        /*
-        JavaRDD<Row> resultOfTrialsRows = trialResults.flatMap(x -> RowFactory.create(x._1(), Math.round(x._2())));
-        StructType schema = DataTypes.createStructType(new StructField[]{DataTypes.createStructField("symbol", DataTypes.StringType, false), DataTypes.createStructField("changePct", DataTypes.IntegerType, false)});
+
+        JavaRDD<Row> resultOfTrialsRows = trialResults
+            .stream()
+            .map(rdd -> rdd.map(x -> RowFactory.create(x._1(), Math.round(x._2() / 100 * symbolStartPrices.get(x._1()) ))))
+            .reduce(jsc.emptyRDD(), (a, b) -> a.union(b));
+        StructType schema = DataTypes.createStructType(new StructField[]{DataTypes.createStructField("symbol", DataTypes.StringType, false), DataTypes.createStructField("changePct", DataTypes.LongType, false)});
         Dataset<Row> resultOfTrialsDF = spark.createDataFrame(resultOfTrialsRows, schema);
         resultOfTrialsDF.registerTempTable("results");
-        List<Row> percentilesRow = spark.sql("select symbol, percentile(changePct, array(0.05,0.50,0.95)) from results groupby symbol").collectAsList();
+        Map<String, Tuple2<Double, Double>> stockValues = spark
+            .sql("select symbol, avg(changePct) from results group by symbol")
+            .toJavaRDD()
+            .mapToPair(r -> new Tuple2<>((String)r.get(0), new Tuple2<>(symbolStartPrices.get(r.get(0)), (Double)r.get(1))))
+            .collectAsMap();
+        List<Tuple2<String,Integer>> result = knapsack(totalInvestment, stockValues);
+        Map<String,Long> reducedResults = jsc.parallelize(result)
+            .mapToPair(x -> x)
+            .countByKey();
 
-        //        System.out.println(sqlContext.sql("select * from results order by changePct").collectAsList());
-        float worstCase = new Float(percentilesRow.get(0).getList(0).get(0).toString()) / 100;
-        float mostLikely = new Float(percentilesRow.get(0).getList(0).get(1).toString()) / 100;
-        float bestCase = new Float(percentilesRow.get(0).getList(0).get(2).toString()) / 100;
+        Double gain = 0.0;
+        List<String> finalStocks = new ArrayList<String>(reducedResults.keySet());
+        for(String stock : finalStocks) {
+            gain += stockValues.get(stock)._2() * reducedResults.get(stock);
+        }
+        System.out.println("Investing in the following stocks:");
+        reducedResults.forEach((s, c) -> System.out.println(s + ": " + c));
+        System.out.println("On average will gain $" + gain + " or " + gain/totalInvestment + "%");
 
-        System.out.println("In a single day, this is what could happen to your stock holdings if you have $" + totalInvestement + " invested");
-        System.out.println(String.format("%25s %7s %7s", "", "$", "%"));
-        System.out.println(String.format("%25s %7d %7.2f%%", "worst case", Math.round(totalInvestement * worstCase / 100), worstCase));
-        System.out.println(String.format("%25s %7d %7.2f%%", "most likely scenario", Math.round(totalInvestement * mostLikely / 100), mostLikely));
-        System.out.println(String.format("%25s %7d %7.2f%%", "best case", Math.round(totalInvestement * bestCase / 100), bestCase));
-        */
         spark.stop();
     }
 
@@ -233,7 +268,7 @@ public class Main {
      * @param map
      * @return
      */
-    Tuple2<Integer, List<Tuple2<String,Integer>>> knapsack(double money, Map<String, Tuple2<Double, Double>> map){
+    private static List<Tuple2<String,Integer>> knapsack(Double money, Map<String, Tuple2<Double, Double>> map){
         List<Tuple2<Integer,List<Tuple2<String, Integer>>>> dp = new ArrayList<>();
 
         List<String> keyList = new ArrayList<String>(map.keySet());
@@ -257,10 +292,10 @@ public class Main {
                 }
             }
         }
-        return dp.get(dp.size()-1);
+        return dp.get(dp.size()-1)._2();
     }
 
-    boolean max(Tuple2<Integer,List<Tuple2<String, Integer>>> t1,
+    private static boolean max(Tuple2<Integer,List<Tuple2<String, Integer>>> t1,
                                                       Tuple2<Integer,List<Tuple2<String, Integer>>> t2){
         if(t1._1 >= t2._1){
             return true;
@@ -272,7 +307,7 @@ public class Main {
 
 
 
-    Tuple2<Integer,List<Tuple2<String, Integer>>> deepCopy(Tuple2<Integer,List<Tuple2<String, Integer>>> obj) {
+    private static Tuple2<Integer,List<Tuple2<String, Integer>>> deepCopy(Tuple2<Integer,List<Tuple2<String, Integer>>> obj) {
         Tuple2<Integer,List<Tuple2<String, Integer>>> item = new Tuple2<>(obj._1,
                 new ArrayList<Tuple2<String, Integer>>());
 
@@ -283,7 +318,7 @@ public class Main {
         return item;
     }
 
-    Tuple2<Integer,List<Tuple2<String, Integer>>> appendToList(Tuple2<Integer,List<Tuple2<String, Integer>>> item, String symbol, double val) {
+    private static Tuple2<Integer,List<Tuple2<String, Integer>>> appendToList(Tuple2<Integer,List<Tuple2<String, Integer>>> item, String symbol, double val) {
         List<Tuple2<String, Integer>> array = item._2;
 
         Tuple2<String, Integer> newTuple = new Tuple2<>(symbol, 1);
