@@ -39,6 +39,21 @@ import java.util.stream.Collectors;
  */
 public class Main {
 
+    public static ThisDate makeDate(String d){
+        return new ThisDate(d);
+    }
+
+    public static boolean validDates(ThisDate from, ThisDate to){
+        if(!(from.checkValid() && to.checkValid())){
+            return false;
+        }
+        if(!to.isAfter(from)){
+            return false;
+        }
+
+        return true;
+    }
+
     public static void main(String[] args) throws Exception {
         SparkSession spark = SparkSession
             .builder()
@@ -49,22 +64,46 @@ public class Main {
         /*
           Initializations
         */
-        final int NUM_TRIALS = 5;
+        int NUM_TRIALS = 5;
         String listOfCompanies = new File("companies_list.txt").toURI().toString();
         String start_date = "1990-01-01";
         String end_date = "2017-11-30";
         String url = "https://www.quandl.com/api/v3/datasets/WIKI/";
         String tickerUrl = "https://www.quandl.com/api/v3/datatables/WIKI/PRICES.csv";
         String API_KEY;
+        Double totalInvestment = 1000.0;
+        ThisDate startD = new ThisDate("");
+        ThisDate endD = new ThisDate("");
+
 
         if (args.length > 0) {
             listOfCompanies = args[0];
         }
-        if (args.length > 1) {
+        if(args.length > 1){
+            totalInvestment = Double.parseDouble(args[1]);
+        }
+        if(args.length > 2){
+            startD = makeDate(args[2]);
+        }
+        if(args.length > 3){
+            endD = makeDate(args[3]);
+        }
+        if(args.length > 4){
+            NUM_TRIALS = Integer.parseInt(args[4]);
+        }
+        if(args.length > 5){
             API_KEY = args[1];
-        } else {
+        }
+        else {
             API_KEY = "fazBfG5rze4V5zxB-qkQ";
         }
+
+        if(!(validDates(startD, endD))){
+            System.out.print("Dates are Invalid");
+            spark.stop();
+            System.exit(0);
+        }
+
 
         DefaultHttpClient client = new DefaultHttpClient();
         HttpGet request = new HttpGet(tickerUrl + String.format("?date=%s&qopts.columns=ticker,close&api_key=%s", end_date, API_KEY));
@@ -99,7 +138,6 @@ public class Main {
             });
 
         //convert from $ to % weight in portfolio
-        Double totalInvestment = 1000.0;
         Map<String, Double> symbolStartPrices = symbolsAndWeightsRDD.mapToPair(t -> {
                 DefaultHttpClient c = new DefaultHttpClient();
                 HttpGet req = new HttpGet(url + String.format("%s.csv?column_index=4&start_date=%s&end_date=%s&api_key=%s", t._1(), start_date, end_date, API_KEY));
