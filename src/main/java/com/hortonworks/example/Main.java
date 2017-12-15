@@ -257,7 +257,7 @@ public class Main {
         }
         System.out.println("Investing in the following stocks:");
         reducedResults.forEach((s, c) -> System.out.println(s + ": " + c));
-        System.out.println("On average will gain $" + gain + " or " + gain/totalInvestment + "%");
+        System.out.println("On average will gain $" + gain + " or " + gain/totalInvestment*100 + "%");
 
         spark.stop();
     }
@@ -275,7 +275,6 @@ public class Main {
         int len = keyList.size();
 
         for(int i = 0; i <= money; i++){
-            String keyI = keyList.get(i);
             Tuple2<Integer,List<Tuple2<String, Integer>>> empty = new Tuple2<>(0, new ArrayList<>());
             dp.add(empty);
 
