@@ -1,0 +1,13 @@
+<component name="libraryTable">
+  <library name="Maven: org.apache.hadoop:hadoop-annotations:2.7.1.2.4.0.0-169">
+    <CLASSES>
+      <root url="jar://$MAVEN_REPOSITORY$/org/apache/hadoop/hadoop-annotations/2.7.1.2.4.0.0-169/hadoop-annotations-2.7.1.2.4.0.0-169.jar!/" />
+    </CLASSES>
+    <JAVADOC>
+      <root url="jar://$MAVEN_REPOSITORY$/org/apache/hadoop/hadoop-annotations/2.7.1.2.4.0.0-169/hadoop-annotations-2.7.1.2.4.0.0-169-javadoc.jar!/" />
+    </JAVADOC>
+    <SOURCES>
+      <root url="jar://$MAVEN_REPOSITORY$/org/apache/hadoop/hadoop-annotations/2.7.1.2.4.0.0-169/hadoop-annotations-2.7.1.2.4.0.0-169-sources.jar!/" />
+    </SOURCES>
+  </library>
+</component>
