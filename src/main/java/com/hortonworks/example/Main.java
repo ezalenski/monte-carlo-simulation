@@ -109,7 +109,9 @@ public class Main {
             System.exit(0);
         }
 
-
+        /*
+          Get top 25 stocks to use as alternative options than the given stocks
+        */
         DefaultHttpClient client = new DefaultHttpClient();
         HttpGet request = new HttpGet(tickerUrl + String.format("?date=%s&qopts.columns=ticker,close&api_key=%s", end_date, API_KEY));
         HttpResponse response = client.execute(request);
@@ -129,10 +131,9 @@ public class Main {
             .collect(Collectors.toList());
 
         /*
-          read a list of stock symbols and their weights in the portfolio, then transform into a Map<Symbol,Weight>
-          1. read in the data, ignoring header
-          2. convert dollar amounts to fractions
-          3. create a local map
+          Add inputted list of random stocks to the top 25 stocks.
+          Weight all stocks equally to measure growth of each stock.
+          Get start prices to be used to decide which stocks to purchase.
         */
         JavaRDD<String> filteredFileRDD = jsc.textFile(listOfCompanies).filter(s -> !s.startsWith("#") && !s.trim().isEmpty());
         filteredFileRDD = filteredFileRDD.union(jsc.parallelize(bestTickers));
@@ -204,7 +205,7 @@ public class Main {
                         .collect(Collectors.toList());
                 } catch(HttpResponseException e) {
                     System.out.println(e.getStatusCode());
-                    throw new Exception("WTF");
+                    throw new Exception("Http Response Error");
                 }
             }).collect()
             .stream()
@@ -229,8 +230,8 @@ public class Main {
 
         /*
           execute NUM_TRIALS
-          1. pick a random date from the list of historical trade dates
-          2. sum(stock weight in overall portfolio * change in price on that date)
+          1. pick a random date for each day in the range from the list of historical trade dates
+          2. aggregate total % change of each stock in the portfolio
         */
         List<Integer> l = new ArrayList<>(NUM_TRIALS);
         for (int i = 0; i < NUM_TRIALS; i++) {
@@ -247,9 +248,9 @@ public class Main {
             }).collect(Collectors.toList());
 
         /*
-          create a temporary table out of the data and take the 5%, 50%, and 95% percentiles
+          create a temporary table out of the data and find the average gain across trials for each stock
 
-          1. multiple each float by 100
+          1. Change % gains to become $ gains
           2. create an RDD with Row types
           3. Create a schema
           4. Use that schema to create a data frame
@@ -268,6 +269,11 @@ public class Main {
             .toJavaRDD()
             .mapToPair(r -> new Tuple2<>((String)r.get(0), new Tuple2<>(symbolStartPrices.get(r.get(0)), (Double)r.get(1))))
             .collectAsMap();
+        /*
+          Give map of symbol -> (price, gain) to knapsack to decide which stocks to purchase.
+          Reduce the results to number of stocks to buy and find the average total gains for the range of days.
+          Output results
+        */
         List<Tuple2<String,Integer>> result = knapsack(totalInvestment, stockValues);
         Map<String,Long> reducedResults = jsc.parallelize(result)
             .mapToPair(x -> x)
